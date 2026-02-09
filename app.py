@@ -5,8 +5,9 @@ import io
 import re
 from decimal import Decimal
 import traceback
+import math # חובה כדי לזהות NaN בצורה מוחלטת
 
-app = FastAPI(title="Aviation Invoice Audit API", version="1.2 - JSON Fix")
+app = FastAPI(title="Aviation Invoice Audit API", version="1.3 - Bulletproof JSON")
 
 # --- CORE LOGIC ---
 
@@ -78,7 +79,7 @@ def parse_eurocontrol_line(line_str):
 
 @app.get("/")
 def read_root():
-    return {"status": "System Operational", "version": "1.2 - JSON NaN Fix"}
+    return {"status": "System Operational", "version": "1.3 - NaN Fix"}
 
 @app.post("/audit/eurocontrol")
 async def audit_eurocontrol(
@@ -160,9 +161,21 @@ async def audit_eurocontrol(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Matching Error: {str(e)}")
 
-    # --- התיקון הקריטי: החלפת NaN ב-None עבור JSON ---
-    # זה הופך כל תא ריק/NaN למשהו ש-JSON מסוגל לקרוא (null)
-    euro_df = euro_df.where(pd.notnull(euro_df), None)
+    # --- FINAL CLEANUP (The Brute Force Fix) ---
+    # ממירים למילון
+    raw_data = euro_df.to_dict(orient="records")
+    
+    # עוברים שורה שורה ומנקים ידנית כל זכר ל-NaN
+    cleaned_data = []
+    for row in raw_data:
+        clean_row = {}
+        for key, value in row.items():
+            # בדיקה: האם זה מספר? והאם המספר הזה הוא "לא מספר" (NaN) או אינסוף?
+            if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                clean_row[key] = None # מחליפים ב-null
+            else:
+                clean_row[key] = value
+        cleaned_data.append(clean_row)
 
     return {
         "stats": {
@@ -170,5 +183,5 @@ async def audit_eurocontrol(
             "matched_rows": len(euro_df[euro_df['MATCH_STATUS'] == 'Matched']),
             "total_amount_eur": euro_df['euro_amount'].sum()
         },
-        "data": euro_df.to_dict(orient="records")
+        "data": cleaned_data
     }
