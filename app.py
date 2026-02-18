@@ -19,23 +19,13 @@ st.markdown("""
 
 def extract_invoice_reference(content):
     """
-    מחלץ את מספר החשבונית מתוך תוכן הקובץ באמצעות Regex משופר.
-    תומך גם בקידומת מספרית (31/...) וגם באותיות (GM/..., HE/...)
+    מחלץ את מספר החשבונית. תומך גם בקידומת מספרית (31/...) וגם באותיות (GM/..., HE/...)
     """
-    # קורא רק את השורות הראשונות (הכותרת נמצאת תמיד בהתחלה)
     lines = content.splitlines()[:3]
-    
     for line in lines:
-        # Regex Pattern Updated:
-        # [A-Z0-9]{2} -> 2 תווים (ספרות או אותיות) - תופס גם 31 וגם GM/HE
-        # /           -> סלאש
-        # \d{5,12}    -> בין 5 ל-12 ספרות (מספר חשבונית)
-        # /           -> סלאש
-        # \d{2}       -> 2 ספרות (קוד משתמש)
         match = re.search(r'([A-Z0-9]{2}/\d{5,12}/\d{2})', line)
         if match:
             return match.group(1)
-            
     return "UNKNOWN_REF"
 
 def parse_eurocontrol_line(line_str):
@@ -46,14 +36,15 @@ def parse_eurocontrol_line(line_str):
         else:
             line = line_str
             
-        # בדיקה שזו שורת טיסה (מתחילה ב-01 בדרך כלל בקבצי PF)
         if line[7:9] != '01': return None
 
-        # חילוץ נתונים לפי מיקומים סטנדרטיים
+        # 1. חילוץ נתונים בסיסיים
         flight_date = line[9:19].replace('/', '-')
-        callsign = line[25:35].split()[0].strip()
+        
+        # הזהות המופיעה בקובץ (יכול להיות רישום ויכול להיות Callsign)
+        raw_identity = line[25:35].split()[0].strip()
 
-        # זיהוי מסלול (Dep/Arr)
+        # זיהוי מסלול
         route_match = re.search(r'([A-Z]{4}[A-Z]{4})', line[35:55])
         if route_match:
             route_block = route_match.group(1)
@@ -63,15 +54,21 @@ def parse_eurocontrol_line(line_str):
             dep_icao = line[38:42].strip()
             arr_icao = line[42:46].strip()
 
-        # זיהוי רישום (Reg)
+        # --- התיקון לרישום המטוס ---
         reg = None
+        # נסיון א': חיפוש רישום תקני (4X או N)
         reg_match = re.search(r'(4X-?[A-Z]{3}|N[0-9]{1,5}[A-Z]{0,2})', line)
+        
         if reg_match:
             reg = reg_match.group(1).replace('-', '')
         else:
-            reg = 'UNKNOWN'
+            # נסיון ב' (התיקון): אם אין רישום תקני, קח את מה שמופיע בעמודת הזהות (למשל HEZ333)
+            if raw_identity:
+                reg = raw_identity
+            else:
+                reg = 'UNKNOWN'
 
-        # זיהוי סכום (Amount)
+        # זיהוי סכום
         amount = Decimal("0.00")
         amount_zone = line[35:]
         decimal_matches = re.findall(r'(\d+,\d+)', amount_zone)
@@ -90,7 +87,7 @@ def parse_eurocontrol_line(line_str):
 
         return {
             'Date': flight_date,
-            'Callsign': callsign,
+            'Callsign': raw_identity, # נשמור את המקור גם כאן
             'Reg': reg,
             'Dep': dep_icao,
             'Arr': arr_icao,
@@ -104,16 +101,13 @@ def generate_excel(df_main, df_unmatched):
     """מייצר קובץ אקסל אחד עם שני גיליונות"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # גיליון 1: Main Report
         df_main.to_excel(writer, sheet_name='Main Report', index=False)
         
-        # התאמת רוחב עמודות לגיליון הראשי
         worksheet = writer.sheets['Main Report']
         for column_cells in worksheet.columns:
             length = max(len(str(cell.value)) for cell in column_cells)
             worksheet.column_dimensions[column_cells[0].column_letter].width = length + 2
 
-        # גיליון 2: Unmatched
         if not df_unmatched.empty:
             df_unmatched.to_excel(writer, sheet_name='Unmatched Investigation', index=False)
             
@@ -135,17 +129,12 @@ if uploaded_euro and uploaded_leon:
     if st.button("RUN AUDIT 🚀", type="primary"):
         with st.spinner('Parsing Invoice & Matching Flights...'):
             
-            # 1. עיבוד יורוקונטרול
             euro_records = []
             
             for uploaded_file in uploaded_euro:
-                # קריאת תוכן הקובץ לזיכרון
                 content = uploaded_file.getvalue().decode("utf-8", errors='ignore')
-                
-                # --- חילוץ מספר החשבונית (הלוגיקה החדשה) ---
                 invoice_ref = extract_invoice_reference(content)
                 
-                # מעבר על השורות וחיפוש טיסות
                 for line in content.splitlines():
                     parsed = parse_eurocontrol_line(line)
                     if parsed:
@@ -169,7 +158,6 @@ if uploaded_euro and uploaded_leon:
                 else:
                     leon_df = pd.read_excel(uploaded_leon)
                 
-                # ניקוי עמודות
                 leon_df.columns = [c.split('[')[0].strip() for c in leon_df.columns]
                 leon_df['Date ADEP'] = pd.to_datetime(leon_df['Date ADEP'], dayfirst=True, errors='coerce').dt.strftime('%Y-%m-%d')
                 
@@ -223,28 +211,24 @@ if uploaded_euro and uploaded_leon:
             
             df_display = euro_df[final_columns].copy()
             
-            # הכנת חריגים
             df_unmatched = euro_df[euro_df['Matched?'] == 'NO'].copy()
             unmatched_export_cols = final_columns + ['Raw_Line']
             df_unmatched_export = df_unmatched[unmatched_export_cols]
 
-            # 5. הצגת דשבורד
+            # 5. דשבורד
             st.success("Analysis Completed Successfully.")
             
-            # חישוב מדדים
             total_flights = len(euro_df)
             matched_flights = len(euro_df[euro_df['Matched?'] == 'YES'])
             match_rate = (matched_flights / total_flights) * 100 if total_flights > 0 else 0
             total_amount = euro_df['Amount'].sum()
 
-            # דשבורד
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Total Flights", total_flights)
             m2.metric("Total Amount", f"€{total_amount:,.2f}")
             m3.metric("Matched Flights", matched_flights)
             m4.metric("Match Rate", f"{match_rate:.1f}%")
 
-            # תצוגת טבלה ראשית
             st.subheader("Invoice Details")
             
             def color_row(row):
@@ -261,7 +245,6 @@ if uploaded_euro and uploaded_leon:
                 with st.expander("Show Unmatched Details"):
                     st.dataframe(df_unmatched_export, hide_index=True)
 
-            # 6. הורדת קובץ אקסל אחד
             excel_data = generate_excel(df_display, df_unmatched_export)
             
             st.download_button(
