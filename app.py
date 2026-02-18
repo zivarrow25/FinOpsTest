@@ -19,22 +19,22 @@ st.markdown("""
 
 def extract_invoice_reference(content):
     """
-    מחלץ את מספר החשבונית מתוך תוכן הקובץ באמצעות Regex.
-    מחפש תבנית של: XX/XXXXXX/XX (למשל: 31/037959/32)
+    מחלץ את מספר החשבונית מתוך תוכן הקובץ באמצעות Regex משופר.
+    תומך גם בקידומת מספרית (31/...) וגם באותיות (GM/..., HE/...)
     """
     # קורא רק את השורות הראשונות (הכותרת נמצאת תמיד בהתחלה)
     lines = content.splitlines()[:3]
     
     for line in lines:
-        # Regex Pattern:
-        # \d{2}   -> 2 ספרות (קוד מדינה)
-        # /       -> סלאש
-        # \d{5,12}-> בין 5 ל-12 ספרות (מספר חשבונית)
-        # /       -> סלאש
-        # \d{2}   -> 2 ספרות (קוד משתמש)
-        match = re.search(r'(\d{2}/\d{5,12}/\d{2})', line)
+        # Regex Pattern Updated:
+        # [A-Z0-9]{2} -> 2 תווים (ספרות או אותיות) - תופס גם 31 וגם GM/HE
+        # /           -> סלאש
+        # \d{5,12}    -> בין 5 ל-12 ספרות (מספר חשבונית)
+        # /           -> סלאש
+        # \d{2}       -> 2 ספרות (קוד משתמש)
+        match = re.search(r'([A-Z0-9]{2}/\d{5,12}/\d{2})', line)
         if match:
-            return match.group(1) # מחזיר רק את ה-31/037959/32
+            return match.group(1)
             
     return "UNKNOWN_REF"
 
@@ -107,6 +107,12 @@ def generate_excel(df_main, df_unmatched):
         # גיליון 1: Main Report
         df_main.to_excel(writer, sheet_name='Main Report', index=False)
         
+        # התאמת רוחב עמודות לגיליון הראשי
+        worksheet = writer.sheets['Main Report']
+        for column_cells in worksheet.columns:
+            length = max(len(str(cell.value)) for cell in column_cells)
+            worksheet.column_dimensions[column_cells[0].column_letter].width = length + 2
+
         # גיליון 2: Unmatched
         if not df_unmatched.empty:
             df_unmatched.to_excel(writer, sheet_name='Unmatched Investigation', index=False)
@@ -136,14 +142,13 @@ if uploaded_euro and uploaded_leon:
                 # קריאת תוכן הקובץ לזיכרון
                 content = uploaded_file.getvalue().decode("utf-8", errors='ignore')
                 
-                # --- שלב קריטי: חילוץ מספר החשבונית מהתוכן ---
+                # --- חילוץ מספר החשבונית (הלוגיקה החדשה) ---
                 invoice_ref = extract_invoice_reference(content)
                 
                 # מעבר על השורות וחיפוש טיסות
                 for line in content.splitlines():
                     parsed = parse_eurocontrol_line(line)
                     if parsed:
-                        # הצמדת מספר החשבונית שמצאנו לכל טיסה בקובץ הזה
                         parsed['Invoice No'] = invoice_ref
                         parsed['Source File'] = uploaded_file.name
                         euro_records.append(parsed)
@@ -220,7 +225,6 @@ if uploaded_euro and uploaded_leon:
             
             # הכנת חריגים
             df_unmatched = euro_df[euro_df['Matched?'] == 'NO'].copy()
-            # מוסיפים את השורה הגולמית לגיליון חריגים בלבד
             unmatched_export_cols = final_columns + ['Raw_Line']
             df_unmatched_export = df_unmatched[unmatched_export_cols]
 
@@ -233,10 +237,10 @@ if uploaded_euro and uploaded_leon:
             match_rate = (matched_flights / total_flights) * 100 if total_flights > 0 else 0
             total_amount = euro_df['Amount'].sum()
 
-            # --- מיני דשבורד (הוחזר!) ---
+            # דשבורד
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Total Flights", total_flights)
-            m2.metric("Total Amount", f"€{total_amount:,.2f}") # סה"כ לתשלום
+            m2.metric("Total Amount", f"€{total_amount:,.2f}")
             m3.metric("Matched Flights", matched_flights)
             m4.metric("Match Rate", f"{match_rate:.1f}%")
 
